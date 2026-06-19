@@ -17,7 +17,7 @@ logging.basicConfig(
 
 
 @app.route("/")
-def home()
+def home():
     return jsonify({
         "message": "Flask Blue-Green Deployment - v2",
         "version": VERSION,
