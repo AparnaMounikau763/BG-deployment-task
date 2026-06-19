@@ -6,7 +6,7 @@ main_bp = Blueprint("main", __name__)
 @main_bp.route("/")
 def home():
     return jsonify({
-        "message": "Flask Blue-Green Deployment",
+        "message": "Flask Blue-Green Deployment - v2",
         "version": config.VERSION,
         "environment": config.ENVIRONMENT
     })
