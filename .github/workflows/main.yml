@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Login to Docker Hub
@@ -22,7 +22,8 @@ jobs:
       - name: Build Docker Image
         run: |
           docker build -t ${{ secrets.DOCKER_USERNAME }}/bluegreen:${{ github.sha }} .
-          docker tag ${{ secrets.DOCKER_USERNAME }}/bluegreen:${{ github.sha }} \
+          docker tag \
+            ${{ secrets.DOCKER_USERNAME }}/bluegreen:${{ github.sha }} \
             ${{ secrets.DOCKER_USERNAME }}/bluegreen:latest
 
       - name: Push Docker Image
@@ -40,21 +41,21 @@ jobs:
           script: |
             set -e
 
-            echo "===== Installing Docker if required ====="
+            echo "===== Installing Docker ====="
 
             if ! command -v docker >/dev/null 2>&1; then
-              sudo apt-get update
-              sudo apt-get install -y docker.io
+              sudo apt update
+              sudo apt install docker.io -y
             fi
 
             sudo systemctl enable docker
             sudo systemctl start docker
 
-            echo "===== Installing Nginx if required ====="
+            echo "===== Installing Nginx ====="
 
             if ! command -v nginx >/dev/null 2>&1; then
-              sudo apt-get update
-              sudo apt-get install -y nginx
+              sudo apt update
+              sudo apt install nginx -y
             fi
 
             sudo systemctl enable nginx
@@ -62,63 +63,58 @@ jobs:
 
             echo "===== Detecting Active Environment ====="
 
-            if [ ! -f /etc/nginx/sites-enabled/default ]; then
+            if grep -q "5001" /etc/nginx/sites-enabled/default 2>/dev/null
+            then
+              ACTIVE=blue
+              TARGET=green
+              ACTIVE_PORT=5001
+              TARGET_PORT=5002
+            else
               ACTIVE=green
               TARGET=blue
               ACTIVE_PORT=5002
               TARGET_PORT=5001
-            else
-              CURRENT_PORT=$(grep -oP 'proxy_pass http://localhost:\K[0-9]+' \
-                /etc/nginx/sites-enabled/default 2>/dev/null || echo "5001")
-
-              if [ "$CURRENT_PORT" = "5001" ]; then
-                ACTIVE=blue
-                TARGET=green
-                ACTIVE_PORT=5001
-                TARGET_PORT=5002
-              else
-                ACTIVE=green
-                TARGET=blue
-                ACTIVE_PORT=5002
-                TARGET_PORT=5001
-              fi
             fi
 
-            echo "Current Environment : $ACTIVE"
-            echo "Target Environment  : $TARGET"
+            echo "Current : $ACTIVE"
+            echo "Target  : $TARGET"
 
-            echo "===== Pulling Latest Image ====="
+            echo "===== Pull Latest Image ====="
 
             docker pull ${{ secrets.DOCKER_USERNAME }}/bluegreen:${{ github.sha }}
 
             docker stop ${TARGET}-app || true
             docker rm ${TARGET}-app || true
 
-            echo "===== Starting Target Container ====="
+            echo "===== Starting Container ====="
 
             docker run -d \
               --name ${TARGET}-app \
-              -p ${TARGET_PORT}:5000 \
-              -e VERSION=${TARGET} \
               --restart always \
+              -e VERSION=${TARGET} \
+              -p ${TARGET_PORT}:5000 \
               ${{ secrets.DOCKER_USERNAME }}/bluegreen:${{ github.sha }}
 
-            echo "===== Waiting for Application ====="
+            echo "===== Waiting for Health ====="
 
             HEALTHY=false
 
-            for i in {1..30}; do
-              if curl --silent --fail http://localhost:${TARGET_PORT}/health >/dev/null; then
+            for i in {1..30}
+            do
+              if curl --silent --fail http://localhost:${TARGET_PORT}/health >/dev/null
+              then
                 HEALTHY=true
                 break
               fi
 
-              echo "Waiting... ($i/30)"
+              echo "Retry $i/30"
+
               sleep 5
             done
 
-            if [ "$HEALTHY" != "true" ]; then
-              echo "Application failed to start."
+            if [ "$HEALTHY" != "true" ]
+            then
+              echo "Application failed"
 
               docker logs ${TARGET}-app || true
 
@@ -130,63 +126,63 @@ jobs:
 
             echo "===== Switching Traffic ====="
 
-            sudo tee /etc/nginx/sites-enabled/default >/dev/null <<EOF
-            server {
-                listen 80;
-
-                location / {
-                    proxy_pass http://localhost:${TARGET_PORT};
-
-                    proxy_set_header Host \$host;
-                    proxy_set_header X-Real-IP \$remote_addr;
-                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                    proxy_set_header X-Forwarded-Proto \$scheme;
-                }
-            }
-            EOF
+            printf "server {\n\
+                listen 80;\n\
+                location / {\n\
+                    proxy_pass http://localhost:${TARGET_PORT};\n\
+                    proxy_set_header Host \$host;\n\
+                    proxy_set_header X-Real-IP \$remote_addr;\n\
+                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;\n\
+                    proxy_set_header X-Forwarded-Proto \$scheme;\n\
+                }\n\
+            }\n" | sudo tee /etc/nginx/sites-enabled/default >/dev/null
 
             sudo nginx -t
+
             sudo systemctl reload nginx
 
-            echo "Traffic switched to $TARGET"
+            echo "Traffic switched to ${TARGET}"
 
-            echo "===== Monitoring Deployment ====="
+            echo "===== Monitoring ====="
 
             sleep 60
+                        echo "===== Final Health Check ====="
 
-            if curl --silent --fail http://localhost:${TARGET_PORT}/health >/dev/null; then
+            if curl --silent --fail http://localhost:${TARGET_PORT}/health >/dev/null
+            then
 
               echo "Deployment Healthy"
 
-              docker stop ${ACTIVE}-app || true
-              docker rm ${ACTIVE}-app || true
+              if docker ps -a --format "{{.Names}}" | grep -q "^${ACTIVE}-app$"
+              then
+                docker stop ${ACTIVE}-app
+                docker rm ${ACTIVE}-app
+              fi
 
               docker image prune -f || true
 
-              echo "=================================="
+              echo "===================================="
               echo "Deployment Successful"
-              echo "Live Environment : $TARGET"
-              echo "=================================="
+              echo "Live Environment : ${TARGET}"
+              echo "===================================="
 
             else
 
+              echo "===================================="
               echo "Deployment Failed"
-              echo "Rolling Back..."
+              echo "Starting Automatic Rollback..."
+              echo "===================================="
 
-              sudo tee /etc/nginx/sites-enabled/default >/dev/null <<EOF
-              server {
-                  listen 80;
-
-                  location / {
-                      proxy_pass http://localhost:${ACTIVE_PORT};
-
-                      proxy_set_header Host \$host;
-                      proxy_set_header X-Real-IP \$remote_addr;
-                      proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-                      proxy_set_header X-Forwarded-Proto \$scheme;
-                  }
-              }
-              EOF
+              printf "server {\n\
+                  listen 80;\n\
+                  location / {\n\
+                      proxy_pass http://localhost:${ACTIVE_PORT};\n\
+                      proxy_set_header Host \$host;\n\
+                      proxy_set_header X-Real-IP \$remote_addr;\n\
+                      proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;\n\
+                      proxy_set_header X-Forwarded-Proto \$scheme;\n\
+                  }\n\
+              }\n" | sudo tee /etc/nginx/sites-enabled/default >/dev/null
 
               sudo nginx -t
               sudo systemctl reload nginx
@@ -194,7 +190,7 @@ jobs:
               docker stop ${TARGET}-app || true
               docker rm ${TARGET}-app || true
 
-              echo "Rollback Successful"
+              echo "Rollback Completed"
 
               exit 1
 
