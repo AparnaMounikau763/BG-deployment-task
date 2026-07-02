@@ -22,13 +22,16 @@ def home():
     })
 
 
+# @app.route("/health")
+# def health():
+#     return jsonify({
+#         "status": "UP",
+#         "environment": VERSION.upper()
+#     }), 200
+
 @app.route("/health")
 def health():
-    return jsonify({
-        "status": "UP",
-        "environment": VERSION.upper()
-    }), 200
-
+    return "FAILED", 500
 
 @app.route("/version")
 def version():
