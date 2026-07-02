@@ -1,14 +1,32 @@
 from flask import Flask, jsonify
 import os
 import socket
+import threading
+import time
 from datetime import datetime
 
 app = Flask(__name__)
 
-# Deployment Environment (Blue or Green)
-VERSION = os.getenv("VERSION", "blue")
-
+VERSION = os.getenv("VERSION", "BLUE")
 HOSTNAME = socket.gethostname()
+
+healthy = True
+
+
+def simulate_failure():
+    global healthy
+
+    # Wait 30 seconds after startup
+    time.sleep(30)
+
+    # Simulate application failure
+    healthy = False
+
+    print("Application became unhealthy.")
+
+
+# Start background thread
+threading.Thread(target=simulate_failure, daemon=True).start()
 
 
 @app.route("/")
@@ -22,16 +40,20 @@ def home():
     })
 
 
-# @app.route("/health")
-# def health():
-#     return jsonify({
-#         "status": "UP",
-#         "environment": VERSION.upper()
-#     }), 200
-
 @app.route("/health")
 def health():
-    return "FAILED", 500
+
+    if healthy:
+        return jsonify({
+            "status": "UP",
+            "environment": VERSION.upper()
+        }), 200
+
+    return jsonify({
+        "status": "DOWN",
+        "environment": VERSION.upper()
+    }), 500
+
 
 @app.route("/version")
 def version():
