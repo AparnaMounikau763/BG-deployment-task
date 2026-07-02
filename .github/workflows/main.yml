@@ -10,7 +10,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Checkout Code
         uses: actions/checkout@v4
 
@@ -20,13 +19,13 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build Image
+      - name: Build Docker Image
         run: |
           docker build -t ${{ secrets.DOCKER_USERNAME }}/bluegreen:${{ github.sha }} .
           docker tag ${{ secrets.DOCKER_USERNAME }}/bluegreen:${{ github.sha }} \
-                     ${{ secrets.DOCKER_USERNAME }}/bluegreen:latest
+            ${{ secrets.DOCKER_USERNAME }}/bluegreen:latest
 
-      - name: Push Image
+      - name: Push Docker Image
         run: |
           docker push ${{ secrets.DOCKER_USERNAME }}/bluegreen:${{ github.sha }}
           docker push ${{ secrets.DOCKER_USERNAME }}/bluegreen:latest
@@ -39,23 +38,46 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
 
           script: |
+            set -e
 
-            # Determine active environment
-            if docker ps --format "{{.Names}}" | grep -q blue-app
+            # Install Docker
+            if ! command -v docker >/dev/null 2>&1
             then
-                TARGET=green
-                PORT=5002
-            else
-                TARGET=blue
-                PORT=5001
+              sudo apt-get update
+              sudo apt-get install -y docker.io
             fi
 
-            echo "Deploying to $TARGET"
+            sudo systemctl enable docker
+            sudo systemctl start docker
+
+            # Install Nginx
+            if ! command -v nginx >/dev/null 2>&1
+            then
+              sudo apt-get update
+              sudo apt-get install -y nginx
+            fi
+
+            sudo systemctl enable nginx
+            sudo systemctl start nginx
+
+            # Determine target environment
+            if docker ps --format "{{.Names}}" | grep -q "^blue-app$"
+            then
+              TARGET=green
+              OLD=blue
+              PORT=5002
+            else
+              TARGET=blue
+              OLD=green
+              PORT=5001
+            fi
+
+            echo "Deploying to ${TARGET}"
+
+            docker pull ${{ secrets.DOCKER_USERNAME }}/bluegreen:latest
 
             docker stop ${TARGET}-app || true
             docker rm ${TARGET}-app || true
-
-            docker pull ${{ secrets.DOCKER_USERNAME }}/bluegreen:latest
 
             docker run -d \
               --name ${TARGET}-app \
@@ -66,26 +88,32 @@ jobs:
 
             sleep 15
 
-            curl http://localhost:${PORT}/health
+            curl --fail http://localhost:${PORT}/health
 
-            if [ $? -ne 0 ]
-            then
-                echo "Health Check Failed"
-                docker stop ${TARGET}-app
-                docker rm ${TARGET}-app
-                exit 1
-            fi
+            # Update Nginx
+            sudo tee /etc/nginx/sites-enabled/default > /dev/null <<EOF
+            server {
+                listen 80;
 
-            if [ "$TARGET" = "blue" ]
-            then
-                sudo cp /home/ubuntu/nginx/blue.conf \
-                        /etc/nginx/sites-enabled/default
-            else
-                sudo cp /home/ubuntu/nginx/green.conf \
-                        /etc/nginx/sites-enabled/default
-            fi
+                location / {
+                    proxy_pass http://localhost:${PORT};
+
+                    proxy_set_header Host \$host;
+                    proxy_set_header X-Real-IP \$remote_addr;
+                    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+                    proxy_set_header X-Forwarded-Proto \$scheme;
+                }
+            }
+            EOF
 
             sudo nginx -t
             sudo systemctl reload nginx
 
+            docker stop ${OLD}-app || true
+            docker rm ${OLD}-app || true
+
+            echo "======================================="
             echo "Deployment Successful"
+            echo "Active Environment : ${TARGET}"
+            echo "Serving Port       : ${PORT}"
+            echo "======================================="
